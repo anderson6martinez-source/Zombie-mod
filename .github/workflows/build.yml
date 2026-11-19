@@ -1,0 +1,52 @@
+name: Build Zombies (2.4 normal)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Crea el csproj solo si no tienes uno. Compila todos los .cs del repo
+      # contra los DLL oficiales de la 2.4 normal (libs/sc24).
+      - name: Crear Zombies.csproj si no existe
+        run: |
+          if ls *.csproj >/dev/null 2>&1; then
+            echo "Ya hay csproj, se usa el tuyo"
+          else
+            cat > Zombies.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>netstandard2.0</TargetFramework>
+              <AssemblyName>Zombies</AssemblyName>
+              <RootNamespace>Game</RootNamespace>
+              <LangVersion>latest</LangVersion>
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+              <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+              <NoWarn>CS0436;CS0108;CS0114;CS0168;CS0219;CS0649;CS0169</NoWarn>
+            </PropertyGroup>
+            <ItemGroup>
+              <Compile Include="**/*.cs" Exclude="obj/**;bin/**" />
+              <Reference Include="Engine"><HintPath>libs/sc24/Engine.dll</HintPath><Private>false</Private></Reference>
+              <Reference Include="EntitySystem"><HintPath>libs/sc24/EntitySystem.dll</HintPath><Private>false</Private></Reference>
+              <Reference Include="Survivalcraft"><HintPath>libs/sc24/Survivalcraft.dll</HintPath><Private>false</Private></Reference>
+            </ItemGroup>
+          </Project>
+          EOF
+          fi
+
+      - name: Compilar
+        run: dotnet build -c Release -o out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zombies
+          path: out/Zombies.dll
