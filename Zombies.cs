@@ -20,6 +20,9 @@ namespace Game
         const string Rapido = "ZombiRapido";
         const string Tanque = "ZombiTanque";
         const string Explosivo = "ZombiExplosivo";
+        const string Griton = "ZombiGriton";
+        const string Sombra = "ZombiSombra";
+        const string Regenerador = "ZombiRegenerador";
 
         // ---- ajustes: cambia estos numeros a tu gusto ----
         const float LuzNoche = 0.30f;          // por debajo de esta luz del cielo es de noche
@@ -39,13 +42,29 @@ namespace Game
         const double TiempoMecha = 2.0;        // segundos de mecha
         const double PeriodoParpadeo = 0.10;   // segundos entre cada cambio de color (parpadeo de la mecha)
 
-        // pesos de variantes en la horda: normal, rapido, tanque, explosivo
-        static readonly string[] Variantes = { Normal, Rapido, Tanque, Explosivo };
-        static readonly int[] Pesos = { 50, 25, 15, 10 };
+        // ---- griton: al detectar a su objetivo llama a otros zombis ----
+        const int AyudaMin = 3;                // zombis que llama el griton
+        const int AyudaMax = 4;
+        const float RadioGritoMin = 4f;        // a que distancia del griton aparecen
+        const float RadioGritoMax = 8f;
+
+        // ---- sombra: solo aparece en las noches mas oscuras ----
+        const float LuzSombra = 0.12f;         // por debajo de esta luz del cielo puede aparecer (menor que LuzNoche)
+
+        // ---- regenerador: se cura solo ----
+        const float RegeneracionPorSegundo = 0.03f; // fraccion de vida por segundo (0.03 = llena en ~33 s)
+        const double PeriodoCuracion = 0.4;    // segundos entre cada cambio de color rosa mientras se cura
+
+        // pesos de variantes en la horda: normal, rapido, tanque, explosivo, griton, sombra, regenerador
+        static readonly string[] Variantes = { Normal, Rapido, Tanque, Explosivo, Griton, Sombra, Regenerador };
+        static readonly int[] Pesos = { 42, 22, 12, 8, 6, 5, 5 };
 
         // aparicion natural (peso, tamano del grupo)
-        static readonly float[] PesoNatural = { 0.5f, 0.3f, 0.15f, 0.2f };
-        static readonly int[] GrupoNatural = { 3, 2, 1, 1 };
+        static readonly float[] PesoNatural = { 0.5f, 0.3f, 0.15f, 0.2f, 0.15f, 0.15f, 0.15f };
+        static readonly int[] GrupoNatural = { 3, 2, 1, 1, 1, 1, 1 };
+
+        // zombis que el griton puede llamar (nunca otro griton ni explosivos)
+        static readonly string[] Ayudantes = { Normal, Normal, Rapido, Tanque };
 
         SubsystemCreatureSpawn creaturas;
         SubsystemTime tiempo;
@@ -67,6 +86,11 @@ namespace Game
 
         // parpadeo: color original de cada zombi con la mecha encendida y el miembro del modelo que se usa
         readonly Dictionary<ComponentCreature, object> colorOriginal = new Dictionary<ComponentCreature, object>();
+
+        // gritones que ya gritaron
+        readonly HashSet<ComponentCreature> gritaron = new HashSet<ComponentCreature>();
+        // regeneradores que se estan curando ahora (parpadean en rosa)
+        readonly HashSet<ComponentCreature> curando = new HashSet<ComponentCreature>();
         static PropertyInfo colorPropiedad;
         static FieldInfo colorCampo;
         static bool colorBuscado;
@@ -93,6 +117,8 @@ namespace Game
             horda.Clear();
             mecha.Clear();
             colorOriginal.Clear();
+            gritaron.Clear();
+            curando.Clear();
             eraNoche = false;
             hordaEstaNoche = false;
             proximaHorda = 0;
@@ -113,6 +139,7 @@ namespace Game
                 type.SpawnSuitabilityFunction = (SubsystemCreatureSpawn.CreatureType creatureType, Point3 point) =>
                 {
                     if (!EsNoche()) return 0f;
+                    if (plantilla == Sombra && cielo.SkyLightIntensity >= LuzSombra) return 0f;
                     int below = Terrain.ExtractContents(
                         subsystemTerrain.Terrain.GetCellValueFast(point.X, point.Y - 1, point.Z));
                     int here = Terrain.ExtractContents(
@@ -150,6 +177,13 @@ namespace Game
             return c.Entity.ValuesDictionary.DatabaseObject.Name;
         }
 
+        // la sombra solo se permite en las noches mas oscuras; si no, sale un zombi normal
+        string Permitida(string variante)
+        {
+            if (variante == Sombra && !(cielo != null && cielo.SkyLightIntensity < LuzSombra)) return Normal;
+            return variante;
+        }
+
         string ElegirVariante()
         {
             int total = 0;
@@ -157,7 +191,7 @@ namespace Game
             int tirada = azar.Next(total);
             for (int i = 0; i < Pesos.Length; i++)
             {
-                if (tirada < Pesos[i]) return Variantes[i];
+                if (tirada < Pesos[i]) return Permitida(Variantes[i]);
                 tirada -= Pesos[i];
             }
             return Normal;
@@ -219,6 +253,7 @@ namespace Game
 
             LimpiarHorda();
             RevisarExplosivos(ahora);
+            RevisarEspeciales(ahora);
         }
 
         void LanzarHorda()
@@ -287,6 +322,91 @@ namespace Game
             }
         }
 
+        // ---------- griton y regenerador ----------
+        void RevisarEspeciales(double ahora)
+        {
+            List<ComponentCreature> gritones = null;
+            List<ComponentCreature> objetivos = null;
+
+            foreach (ComponentCreature c in creaturas.Creatures)
+            {
+                if (!EstaViva(c)) continue;
+                string plantilla = Plantilla(c);
+
+                if (plantilla == Regenerador)
+                {
+                    // se cura un poco en cada revision (cada 0.25 s)
+                    float vida = c.ComponentHealth.Health;
+                    if (vida < 1f)
+                    {
+                        c.ComponentHealth.Health = Math.Min(1f, vida + RegeneracionPorSegundo * 0.25f);
+                        curando.Add(c);
+                    }
+                    else if (curando.Remove(c))
+                    {
+                        RestaurarColor(c); // ya esta llena: vuelve a su color normal
+                    }
+                    continue;
+                }
+
+                if (plantilla != Griton) continue;
+
+                ComponentChaseBehavior persecucion = c.Entity.FindComponent<ComponentChaseBehavior>();
+                if (persecucion == null || persecucion.Target == null || !EstaViva(persecucion.Target)) continue;
+
+                // grita una sola vez, cuando detecta a su objetivo
+                if (gritaron.Add(c))
+                {
+                    if (gritones == null) { gritones = new List<ComponentCreature>(); objetivos = new List<ComponentCreature>(); }
+                    gritones.Add(c);
+                    objetivos.Add(persecucion.Target);
+                }
+            }
+
+            // se invoca fuera del bucle: aparecer zombis cambia la lista de criaturas
+            if (gritones != null)
+            {
+                for (int i = 0; i < gritones.Count; i++) Gritar(gritones[i], objetivos[i]);
+            }
+
+            gritaron.RemoveWhere(g => !EstaViva(g));
+            curando.RemoveWhere(g => !EstaViva(g));
+        }
+
+        // el griton llama zombis alrededor suyo y los manda contra su objetivo
+        void Gritar(ComponentCreature griton, ComponentCreature objetivo)
+        {
+            if (terreno == null || !EstaViva(griton) || !EstaViva(objetivo)) return;
+            Vector3 centro = griton.ComponentBody.Position;
+            int cantidad = azar.Next(AyudaMin, AyudaMax + 1);
+
+            for (int i = 0; i < cantidad && horda.Count < MaxZombisHorda; i++)
+            {
+                double angulo = azar.NextDouble() * 6.2831853;
+                double radio = RadioGritoMin + azar.NextDouble() * (RadioGritoMax - RadioGritoMin);
+                int x = (int)Math.Floor(centro.X + Math.Cos(angulo) * radio);
+                int z = (int)Math.Floor(centro.Z + Math.Sin(angulo) * radio);
+                int y = terreno.Terrain.GetTopHeight(x, z) + 1;
+
+                int suelo = Terrain.ExtractContents(terreno.Terrain.GetCellValueFast(x, y - 1, z));
+                int aqui = Terrain.ExtractContents(terreno.Terrain.GetCellValueFast(x, y, z));
+                if (suelo == WaterBlock.Index || aqui == WaterBlock.Index) continue;
+                if (!BlocksManager.Blocks[suelo].IsCollidable) continue;
+
+                string plantilla = Ayudantes[azar.Next(Ayudantes.Length)];
+                Entity entidad = creaturas.SpawnCreature(plantilla, new Vector3(x + 0.5f, y, z + 0.5f), false);
+                if (entidad == null) continue;
+
+                ComponentCreature criatura = entidad.FindComponent<ComponentCreature>();
+                if (criatura == null) continue;
+                horda.Add(criatura); // cuenta para el tope y desaparece al amanecer como las hordas
+
+                ComponentChaseBehavior persecucion = entidad.FindComponent<ComponentChaseBehavior>();
+                if (persecucion != null)
+                    persecucion.Attack(objetivo, AlcanceHorda, 90f, false);
+            }
+        }
+
         // ---------- parpadeo de la mecha ----------
         // El nombre exacto del color del modelo cambia entre versiones: se busca por reflexion
         // (DiffuseColor o Color en ComponentCreatureModel). Si no existe, solo se avisa en el log
@@ -320,13 +440,13 @@ namespace Game
             Log.Warning("Zombies: no se encontro DiffuseColor/Color en ComponentCreatureModel; el parpadeo queda desactivado");
         }
 
-        static object ColorDeParpadeo()
+        static object ColorDeParpadeo(int tipo)
         {
             Type mt = colorPropiedad != null ? colorPropiedad.PropertyType : colorCampo.FieldType;
             Type t = Nullable.GetUnderlyingType(mt) ?? mt;
-            if (t == typeof(Vector3)) return new Vector3(1f, 0.2f, 0.2f);
-            if (t == typeof(Vector4)) return new Vector4(1f, 0.2f, 0.2f, 1f);
-            return new Color((byte)255, (byte)50, (byte)50);
+            if (t == typeof(Vector3)) return tipo == 1 ? new Vector3(1f, 0.45f, 0.7f) : new Vector3(1f, 0.2f, 0.2f);
+            if (t == typeof(Vector4)) return tipo == 1 ? new Vector4(1f, 0.45f, 0.7f, 1f) : new Vector4(1f, 0.2f, 0.2f, 1f);
+            return tipo == 1 ? new Color((byte)255, (byte)115, (byte)180) : new Color((byte)255, (byte)50, (byte)50);
         }
 
         static object LeerColor(ComponentCreatureModel modelo)
@@ -340,7 +460,7 @@ namespace Game
             else colorCampo.SetValue(modelo, valor);
         }
 
-        void PonerColor(ComponentCreature c, bool encendido)
+        void PonerColor(ComponentCreature c, bool encendido, int tipo)
         {
             try
             {
@@ -349,7 +469,7 @@ namespace Game
                 ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
                 if (modelo == null) return;
                 if (!colorOriginal.ContainsKey(c)) colorOriginal[c] = LeerColor(modelo);
-                EscribirColor(modelo, encendido ? ColorDeParpadeo() : colorOriginal[c]);
+                EscribirColor(modelo, encendido ? ColorDeParpadeo(tipo) : colorOriginal[c]);
             }
             catch (Exception e)
             {
@@ -373,13 +493,25 @@ namespace Game
 
         void Parpadear(double ahora)
         {
-            if (mecha.Count == 0 || parpadeoDesactivado) return;
+            if (parpadeoDesactivado || (mecha.Count == 0 && curando.Count == 0)) return;
+
+            // mecha del explosivo: parpadeo rojo rapido
             foreach (KeyValuePair<ComponentCreature, double> par in mecha)
             {
                 if (!EstaViva(par.Key)) continue;
                 double transcurrido = TiempoMecha - (par.Value - ahora);
                 bool encendido = ((int)Math.Floor(transcurrido / PeriodoParpadeo)) % 2 == 0;
-                PonerColor(par.Key, encendido);
+                PonerColor(par.Key, encendido, 0);
+            }
+
+            // regenerador curandose: parpadeo rosa mas lento
+            if (curando.Count > 0)
+            {
+                bool rosa = ((int)Math.Floor(ahora / PeriodoCuracion)) % 2 == 0;
+                foreach (ComponentCreature c in curando)
+                {
+                    if (EstaViva(c)) PonerColor(c, rosa, 1);
+                }
             }
         }
 
