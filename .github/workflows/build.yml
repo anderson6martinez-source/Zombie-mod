@@ -1,52 +1,45 @@
-name: Build Zombies (2.4 normal)
+name: Compilar mod Zombies
 
 on:
   push:
-  workflow_dispatch:
+  workflow_dispatch:   # permite lanzarlo a mano desde la pestaña Actions
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - name: Instalar .NET
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      # Crea el csproj solo si no tienes uno. Compila todos los .cs del repo
-      # contra los DLL oficiales de la 2.4 normal (libs/sc24).
-      - name: Crear Zombies.csproj si no existe
+      - name: Crear modinfo.json
         run: |
-          if ls *.csproj >/dev/null 2>&1; then
-            echo "Ya hay csproj, se usa el tuyo"
-          else
-            cat > Zombies.csproj <<'EOF'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <TargetFramework>netstandard2.0</TargetFramework>
-              <AssemblyName>Zombies</AssemblyName>
-              <RootNamespace>Game</RootNamespace>
-              <LangVersion>latest</LangVersion>
-              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-              <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-              <NoWarn>CS0436;CS0108;CS0114;CS0168;CS0219;CS0649;CS0169</NoWarn>
-            </PropertyGroup>
-            <ItemGroup>
-              <Compile Include="**/*.cs" Exclude="obj/**;bin/**" />
-              <Reference Include="Engine"><HintPath>libs/sc24/Engine.dll</HintPath><Private>false</Private></Reference>
-              <Reference Include="EntitySystem"><HintPath>libs/sc24/EntitySystem.dll</HintPath><Private>false</Private></Reference>
-              <Reference Include="Survivalcraft"><HintPath>libs/sc24/Survivalcraft.dll</HintPath><Private>false</Private></Reference>
-            </ItemGroup>
-          </Project>
-          EOF
-          fi
+          cat > modinfo.json <<'JSON'
+          {
+            "Name": "Zombies",
+            "Version": "1.0.0",
+            "ApiVersion": "1.8.0.0",
+            "Description": "Adds zombie creature types and related behavior.",
+            "ScVersion": "2.4.0.0",
+            "PackageName": "Zombies"
+          }
+          JSON
 
-      - name: Compilar
-        run: dotnet build -c Release -o out
+      - name: Comprobar DLL del juego
+        run: |
+          for f in Survivalcraft.dll Engine.dll EntitySystem.dll; do
+            test -f "$f" || { echo "Falta $f en la raiz del repositorio"; exit 1; }
+          done
 
-      - uses: actions/upload-artifact@v4
+      - name: Compilar y empaquetar
+        run: dotnet build Zombies.csproj -c Release
+
+      - name: Subir el .scmod
+        uses: actions/upload-artifact@v4
         with:
-          name: Zombies
-          path: out/Zombies.dll
+          name: Zombies_API1.8.scmod
+          path: Zombies_API1.8.scmod
