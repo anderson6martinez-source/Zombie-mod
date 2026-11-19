@@ -6,8 +6,21 @@ import glob, io, os, sys, zipfile
 
 base, dll, salida = sys.argv[1:4]
 datos = open(base, "rb").read()
-cabecera = datos[:49]
-origen = zipfile.ZipFile(io.BytesIO(datos[49:][::-1]))
+# El base puede venir con la cabecera de 49 bytes o sin ella (solo el zip invertido): se detecta.
+def abrir(b):
+    try:
+        z = zipfile.ZipFile(io.BytesIO(b[::-1]))
+        return z if z.testzip() is None else None
+    except zipfile.BadZipFile:
+        return None
+
+origen = abrir(datos)
+cabecera = b""
+if origen is None:
+    cabecera = datos[:49]
+    origen = abrir(datos[49:])
+if origen is None:
+    sys.exit("ERROR: " + base + " no es un .scmod valido (ni con ni sin cabecera de 49 bytes)")
 
 nuevos = {os.path.basename(dll.replace("\\", "/")): dll}
 aqui = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +42,6 @@ open(salida, "wb").write(cabecera + buf.getvalue()[::-1])
 
 # Comprobacion
 final = open(salida, "rb").read()
-comprobar = zipfile.ZipFile(io.BytesIO(final[49:][::-1]))
+comprobar = zipfile.ZipFile(io.BytesIO(final[len(cabecera):][::-1]))
 assert comprobar.testzip() is None
 print("OK:", salida, comprobar.namelist())

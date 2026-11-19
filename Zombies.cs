@@ -45,7 +45,7 @@ namespace Game
         // ---- campeones (estilo TBOI) ----
         const double ProbCampeon = 0.10;       // probabilidad total de que un zombi nazca campeon (incluye al dorado)
         const double ProbDorado = 0.02;        // parte de esa probabilidad que es el dorado: 2% de todos los zombis
-        const float EscalaCampeon = 2.25f;     // tamano: 2.25 = 125% mas grande (pon 1.25 si querias 125% del tamano normal)
+        const float EscalaCampeon = 1.25f;     // tamano: 1.25 = 125% del tamano normal (2.25 seria 125% mas grande)
         const float VidaRojo = 1.5f;           // rojo: aguanta x1.5 de dano
         const float VelocidadAmarillo = 1.6f;  // amarillo: camina x1.6 mas rapido
         const float VenenoPorSegundo = 0.5f;   // verde: dano de veneno cada segundo
