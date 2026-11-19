@@ -30,7 +30,7 @@ jobs:
             </PropertyGroup>
             <ItemGroup>
               <Compile Include="../Zombies.cs" />
-              <SCDlls Include="../libs/sc24/*.dll" />
+              <SCDlls Include="../Engine.dll;../EntitySystem.dll;../Survivalcraft.dll" />
               <Reference Include="@(SCDlls)">
                 <Private>false</Private>
               </Reference>
