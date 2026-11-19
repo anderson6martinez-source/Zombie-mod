@@ -14,10 +14,12 @@ def abrir(b):
     except zipfile.BadZipFile:
         return None
 
+# Cabecera de 49 bytes que el juego exige al inicio de todo .scmod
+CABECERA = bytes.fromhex("e69c89e5a4b4e69c89e884b8e5a4a9e6898de5b091e5b9b42ce8808de78cb4e8a1a8e6bc94e695a2e4b8bae4babae58588")
 origen = abrir(datos)
-cabecera = b""
+cabecera = CABECERA          # base sin cabecera: se le pone la correcta
 if origen is None:
-    cabecera = datos[:49]
+    cabecera = datos[:49]    # base con cabecera: se conserva
     origen = abrir(datos[49:])
 if origen is None:
     sys.exit("ERROR: " + base + " no es un .scmod valido (ni con ni sin cabecera de 49 bytes)")
