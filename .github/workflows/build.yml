@@ -43,3 +43,11 @@ jobs:
         with:
           name: Zombies_API1.8.scmod
           path: Zombies_API1.8.scmod
+
+      - name: Subir DLL y modinfo.json sueltos
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zombies_dll_y_modinfo
+          path: |
+            modinfo.json
+            bin/Release/netstandard2.0/Zombies.dll
