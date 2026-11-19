@@ -404,16 +404,36 @@ namespace Game
             return new Color((byte)(r * 255f), (byte)(g * 255f), (byte)(b * 255f));
         }
 
+        // El juego reescribe DiffuseColor en cada cuadro (ComponentCreatureModel.Animate), asi que
+        // tenir con colores no se ve. Los campeones usan su textura propia: Textures/Creatures/<Zombi>Campeon<Color>.
+        static readonly string[] NombresColor = { "Rojo", "Amarillo", "Verde", "Azul", "Morado", "Dorado" };
+        static readonly Dictionary<string, Engine.Graphics.Texture2D> texturasCampeon =
+            new Dictionary<string, Engine.Graphics.Texture2D>();
+
+        static Engine.Graphics.Texture2D TexturaCampeon(string plantilla, int tipo)
+        {
+            string ruta = "Textures/Creatures/" + plantilla + "Campeon" + NombresColor[tipo];
+            Engine.Graphics.Texture2D tex;
+            if (texturasCampeon.TryGetValue(ruta, out tex)) return tex;
+            try { tex = ContentManager.Get<Engine.Graphics.Texture2D>(ruta); }
+            catch (Exception e)
+            {
+                tex = null;
+                Log.Warning("Zombies: no se pudo cargar la textura " + ruta + ": " + e.Message);
+            }
+            texturasCampeon[ruta] = tex;
+            return tex;
+        }
+
         void Tenir(ComponentCreature c, int tipo)
         {
             try
             {
-                BuscarColor();
-                if (colorPropiedad == null && colorCampo == null) return;
                 ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
                 if (modelo == null) return;
-                float[] rgb = ColoresCampeon[tipo];
-                EscribirColor(modelo, ConvertirColor(rgb[0], rgb[1], rgb[2]));
+                Engine.Graphics.Texture2D tex = TexturaCampeon(Plantilla(c), tipo);
+                if (tex != null && !object.ReferenceEquals(modelo.TextureOverride, tex))
+                    modelo.TextureOverride = tex;
             }
             catch (Exception e)
             {
@@ -995,16 +1015,35 @@ namespace Game
             else colorCampo.SetValue(modelo, valor);
         }
 
+        // El parpadeo usa la textura rosa del regenerador (el color del modelo lo reescribe el juego en cada cuadro)
+        static Engine.Graphics.Texture2D texturaRosa;
+        static bool rosaBuscada;
+
+        static Engine.Graphics.Texture2D TexturaRosa()
+        {
+            if (rosaBuscada) return texturaRosa;
+            rosaBuscada = true;
+            try { texturaRosa = ContentManager.Get<Engine.Graphics.Texture2D>("Textures/Creatures/ZombiRegeneradorRosa"); }
+            catch (Exception e)
+            {
+                texturaRosa = null;
+                Log.Warning("Zombies: no se pudo cargar ZombiRegeneradorRosa: " + e.Message);
+            }
+            return texturaRosa;
+        }
+
         void PonerColor(ComponentCreature c, bool encendido, int tipo)
         {
             try
             {
-                BuscarColor();
-                if (colorPropiedad == null && colorCampo == null) { parpadeoDesactivado = true; return; }
+                Engine.Graphics.Texture2D rosa = TexturaRosa();
+                if (rosa == null) { parpadeoDesactivado = true; return; }
                 ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
                 if (modelo == null) return;
-                if (!colorOriginal.ContainsKey(c)) colorOriginal[c] = LeerColor(modelo);
-                EscribirColor(modelo, encendido ? ColorDeParpadeo(tipo) : colorOriginal[c]);
+                // se guarda la textura de antes de curarse (la normal o la de su campeon)
+                if (!colorOriginal.ContainsKey(c)) colorOriginal[c] = modelo.TextureOverride;
+                Engine.Graphics.Texture2D normal = colorOriginal[c] as Engine.Graphics.Texture2D;
+                modelo.TextureOverride = encendido ? rosa : normal;
             }
             catch (Exception e)
             {
@@ -1021,7 +1060,7 @@ namespace Game
             try
             {
                 ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
-                if (modelo != null) EscribirColor(modelo, original);
+                if (modelo != null) modelo.TextureOverride = original as Engine.Graphics.Texture2D;
             }
             catch (Exception) { }
         }
