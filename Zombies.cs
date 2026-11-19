@@ -36,7 +36,8 @@ namespace Game
         const float AlcanceHorda = 45f;        // desde donde la horda va por el jugador
         const float PresionExplosion = 20f;    // fuerza de la explosion (dinamita ~ 39)
         const float DistanciaMecha = 2.0f;     // a que distancia enciende la mecha
-        const double TiempoMecha = 0.9;        // segundos de mecha
+        const double TiempoMecha = 2.0;        // segundos de mecha
+        const double PeriodoParpadeo = 0.10;   // segundos entre cada cambio de color (parpadeo de la mecha)
 
         // pesos de variantes en la horda: normal, rapido, tanque, explosivo
         static readonly string[] Variantes = { Normal, Rapido, Tanque, Explosivo };
@@ -64,6 +65,13 @@ namespace Game
         static MethodInfo metodoExplosion;
         static bool explosionBuscada;
 
+        // parpadeo: color original de cada zombi con la mecha encendida y el miembro del modelo que se usa
+        readonly Dictionary<ComponentCreature, object> colorOriginal = new Dictionary<ComponentCreature, object>();
+        static PropertyInfo colorPropiedad;
+        static FieldInfo colorCampo;
+        static bool colorBuscado;
+        static bool parpadeoDesactivado;
+
         public override void __ModInitialize()
         {
             ModsManager.RegisterHook("InitializeCreatureTypes", this);
@@ -84,6 +92,7 @@ namespace Game
             explosiones = proyecto.FindSubsystem<SubsystemExplosions>(true);
             horda.Clear();
             mecha.Clear();
+            colorOriginal.Clear();
             eraNoche = false;
             hordaEstaNoche = false;
             proximaHorda = 0;
@@ -185,6 +194,7 @@ namespace Game
         {
             if (creaturas == null || tiempo == null || cielo == null) return;
             double ahora = tiempo.GameTime;
+            Parpadear(ahora); // cada frame, para que el parpadeo sea fluido
             if (ahora < proximaRevision) return;
             proximaRevision = ahora + 0.25;
 
@@ -271,10 +281,113 @@ namespace Game
             foreach (ComponentCreature c in quitar)
             {
                 horda.Remove(c);
-                mecha.Remove(c);
+                QuitarMecha(c);
                 if (amanecer && EstaViva(c))
                     creaturas.Project.RemoveEntity(c.Entity, true);
             }
+        }
+
+        // ---------- parpadeo de la mecha ----------
+        // El nombre exacto del color del modelo cambia entre versiones: se busca por reflexion
+        // (DiffuseColor o Color en ComponentCreatureModel). Si no existe, solo se avisa en el log
+        // y el zombi explota igual, sin parpadear.
+        static bool TipoColorSoportado(Type tipo)
+        {
+            Type t = Nullable.GetUnderlyingType(tipo) ?? tipo;
+            return t == typeof(Vector3) || t == typeof(Vector4) || t == typeof(Color);
+        }
+
+        static void BuscarColor()
+        {
+            if (colorBuscado) return;
+            colorBuscado = true;
+            BindingFlags f = BindingFlags.Public | BindingFlags.Instance;
+            foreach (string nombre in new string[] { "DiffuseColor", "Color" })
+            {
+                PropertyInfo p = typeof(ComponentCreatureModel).GetProperty(nombre, f);
+                if (p != null && p.CanRead && p.CanWrite && TipoColorSoportado(p.PropertyType))
+                {
+                    colorPropiedad = p;
+                    return;
+                }
+                FieldInfo fi = typeof(ComponentCreatureModel).GetField(nombre, f);
+                if (fi != null && TipoColorSoportado(fi.FieldType))
+                {
+                    colorCampo = fi;
+                    return;
+                }
+            }
+            Log.Warning("Zombies: no se encontro DiffuseColor/Color en ComponentCreatureModel; el parpadeo queda desactivado");
+        }
+
+        static object ColorDeParpadeo()
+        {
+            Type mt = colorPropiedad != null ? colorPropiedad.PropertyType : colorCampo.FieldType;
+            Type t = Nullable.GetUnderlyingType(mt) ?? mt;
+            if (t == typeof(Vector3)) return new Vector3(1f, 0.2f, 0.2f);
+            if (t == typeof(Vector4)) return new Vector4(1f, 0.2f, 0.2f, 1f);
+            return new Color((byte)255, (byte)50, (byte)50);
+        }
+
+        static object LeerColor(ComponentCreatureModel modelo)
+        {
+            return colorPropiedad != null ? colorPropiedad.GetValue(modelo, null) : colorCampo.GetValue(modelo);
+        }
+
+        static void EscribirColor(ComponentCreatureModel modelo, object valor)
+        {
+            if (colorPropiedad != null) colorPropiedad.SetValue(modelo, valor, null);
+            else colorCampo.SetValue(modelo, valor);
+        }
+
+        void PonerColor(ComponentCreature c, bool encendido)
+        {
+            try
+            {
+                BuscarColor();
+                if (colorPropiedad == null && colorCampo == null) { parpadeoDesactivado = true; return; }
+                ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
+                if (modelo == null) return;
+                if (!colorOriginal.ContainsKey(c)) colorOriginal[c] = LeerColor(modelo);
+                EscribirColor(modelo, encendido ? ColorDeParpadeo() : colorOriginal[c]);
+            }
+            catch (Exception e)
+            {
+                parpadeoDesactivado = true;
+                Log.Warning("Zombies: el parpadeo fallo y se desactiva: " + e.Message);
+            }
+        }
+
+        void RestaurarColor(ComponentCreature c)
+        {
+            object original;
+            if (!colorOriginal.TryGetValue(c, out original)) return;
+            colorOriginal.Remove(c);
+            try
+            {
+                ComponentCreatureModel modelo = c.Entity.FindComponent<ComponentCreatureModel>();
+                if (modelo != null) EscribirColor(modelo, original);
+            }
+            catch (Exception) { }
+        }
+
+        void Parpadear(double ahora)
+        {
+            if (mecha.Count == 0 || parpadeoDesactivado) return;
+            foreach (KeyValuePair<ComponentCreature, double> par in mecha)
+            {
+                if (!EstaViva(par.Key)) continue;
+                double transcurrido = TiempoMecha - (par.Value - ahora);
+                bool encendido = ((int)Math.Floor(transcurrido / PeriodoParpadeo)) % 2 == 0;
+                PonerColor(par.Key, encendido);
+            }
+        }
+
+        // saca al zombi de la lista de mechas y le devuelve su color normal
+        void QuitarMecha(ComponentCreature c)
+        {
+            mecha.Remove(c);
+            RestaurarColor(c);
         }
 
         void RevisarExplosivos(double ahora)
@@ -312,13 +425,13 @@ namespace Game
                         huerfanos.Add(c);
                     }
                 }
-                if (huerfanos != null) foreach (ComponentCreature c in huerfanos) mecha.Remove(c);
+                if (huerfanos != null) foreach (ComponentCreature c in huerfanos) QuitarMecha(c);
             }
 
             if (aExplotar == null) return;
             foreach (ComponentCreature c in aExplotar)
             {
-                mecha.Remove(c);
+                QuitarMecha(c);
                 Vector3 p = c.ComponentBody.Position;
                 int x = (int)Math.Floor(p.X);
                 int y = (int)Math.Floor(p.Y + 0.5f);
