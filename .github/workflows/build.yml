@@ -1,52 +1,53 @@
-name: Compilar mod Zombies
+name: Build Zombies24
 
 on:
   push:
-  workflow_dispatch:   # permite lanzarlo a mano desde la pestaña Actions
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar el repositorio
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Instalar .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: 8.0.x
 
-      - name: Crear modinfo.json
+      # Compila Zombies.cs -> Zombies.dll contra las DLL del juego en libs/sc24
+      - name: Compilar Zombies.dll
         run: |
-          cat > modinfo.json <<'JSON'
-          {
-            "Name": "Zombies",
-            "Version": "1.0.0",
-            "ApiVersion": "1.8.0.0",
-            "Description": "Adds zombie creature types and related behavior.",
-            "ScVersion": "2.4.0.0",
-            "PackageName": "Zombies"
-          }
-          JSON
+          mkdir -p build
+          cat > build/Zombies.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>netstandard2.0</TargetFramework>
+              <AssemblyName>Zombies</AssemblyName>
+              <LangVersion>latest</LangVersion>
+              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+              <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+              <NoWarn>CS0168;CS0219;CS0649;CS0414;NU1701</NoWarn>
+            </PropertyGroup>
+            <ItemGroup>
+              <Compile Include="../Zombies.cs" />
+              <SCDlls Include="../libs/sc24/*.dll" />
+              <Reference Include="@(SCDlls)">
+                <Private>false</Private>
+              </Reference>
+            </ItemGroup>
+          </Project>
+          EOF
+          dotnet build build/Zombies.csproj -c Release -o build/out
+          ls -la build/out
 
-      - name: Comprobar DLL del juego
+      # Empaqueta igual que empaquetar.py: base + DLL -> .scmod final
+      - name: Empaquetar .scmod
         run: |
-          for f in Survivalcraft.dll Engine.dll EntitySystem.dll; do
-            test -f "$f" || { echo "Falta $f en la raiz del repositorio"; exit 1; }
-          done
+          mkdir -p salida
+          python3 empaquetar.py base_zombies24.scmod build/out/Zombies.dll salida/Zombies24.scmod
 
-      - name: Compilar y empaquetar
-        run: dotnet build Zombies.csproj -c Release
-
-      - name: Reunir modinfo.json y Zombies.dll en una sola carpeta
-        run: |
-          mkdir paquete
-          cp modinfo.json paquete/
-          cp bin/Release/netstandard2.0/Zombies.dll paquete/
-
-      # Al subir la carpeta "paquete", sus archivos quedan en la raiz del zip descargado
-      - name: Subir el paquete
+      - name: Subir mod empaquetado
         uses: actions/upload-artifact@v4
         with:
-          name: Zombies_API1.8
-          path: paquete/
+          name: Zombies24
+          path: salida/Zombies24.scmod
