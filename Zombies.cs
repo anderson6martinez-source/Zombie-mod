@@ -119,6 +119,16 @@ namespace Game
         static bool pickableBuscado;
         static List<int> valoresBotin;
 
+        // tipo de campeon por criatura (-1 = no es campeon). Lo lee el panel de vida de HealthBars por reflexion.
+        static readonly Dictionary<Entity, int> tiposCampeon = new Dictionary<Entity, int>();
+
+        public static int TipoCampeon(Entity e)
+        {
+            int t;
+            if (e == null || !tiposCampeon.TryGetValue(e, out t)) return -1;
+            return t;
+        }
+
         // campeones
         readonly HashSet<ComponentCreature> vistos = new HashSet<ComponentCreature>();
         readonly Dictionary<ComponentCreature, int> campeones = new Dictionary<ComponentCreature, int>();
@@ -168,6 +178,7 @@ namespace Game
             curando.Clear();
             vistos.Clear();
             campeones.Clear();
+            tiposCampeon.Clear();
             campeonPos.Clear();
             saludPrevia.Clear();
             venenoHasta.Clear();
@@ -457,6 +468,7 @@ namespace Game
         void HacerCampeon(ComponentCreature c, int tipo)
         {
             campeones[c] = tipo;
+            tiposCampeon[c.Entity] = tipo;
             campeonPos[c] = c.ComponentBody.Position;
             Escalar(c, EscalaCampeon);
             Tenir(c, tipo);
@@ -550,6 +562,7 @@ namespace Game
                 int tipo = campeones[c];
                 Vector3 p = campeonPos[c];
                 campeones.Remove(c);
+                tiposCampeon.Remove(c.Entity);
                 campeonPos.Remove(c);
                 bool murio = c.ComponentHealth != null && c.ComponentHealth.Health <= 0f;
                 if (!murio) continue; // desaparecio (amanecer): sin efecto
