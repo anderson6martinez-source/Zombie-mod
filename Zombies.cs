@@ -3,7 +3,11 @@
 //  - Aparecen solos de noche (aparicion natural) y en hordas nocturnas alrededor de los jugadores.
 //  - El zombi explosivo explota al morir (en el lugar donde muere).
 //  - Las hordas desaparecen al amanecer.
-//  - Campeones estilo TBOI: algunos zombis nacen grandes y con color (rojo, amarillo, verde, azul, morado, dorado).
+//  - Campeones estilo TBOI: algunos zombis nacen grandes y con color (rojo, amarillo, verde, azul, morado, dorado,
+//    negro: drena stamina | blanco: congela | naranja: quema). Cada color suelta su propio botin.
+//  - Luna roja cada 7 dias (hordas x2, mas campeones) y jefe de horda cada 3 dias (barra arriba a la izquierda).
+//  - El tanque y el jefe rompen puertas y bloques de madera; el zombi rapido salta obstaculos.
+//  - Correr hace ruido y atrae zombis cercanos. Panel de dia y zombis eliminados.
 // Un solo archivo: se compila en Zombies.dll. No usa OnProjectLoaded: el estado se reinicia en
 // InitializeCreatureTypes, que el juego llama una vez por cada mundo que se carga.
 using System;
@@ -58,6 +62,9 @@ namespace Game
         const float AlcanceGolpe = 4.0f;       // distancia a la que un golpe se atribuye al campeon verde/azul
 
         const int CRojo = 0, CAmarillo = 1, CVerde = 2, CAzul = 3, CMorado = 4, CDorado = 5;
+        const int CNegro = 6, CBlanco = 7, CNaranja = 8, CJefe = 9;   // negro: drena stamina | blanco: congela | naranja: quema | jefe: jefe de horda
+        // tipos que pueden tocar al azar (el dorado tiene su propia tirada)
+        static readonly int[] TiposAzar = { CRojo, CAmarillo, CVerde, CAzul, CMorado, CNegro, CBlanco, CNaranja };
         static readonly float[][] ColoresCampeon =
         {
             new float[] { 0.75f, 0.10f, 0.10f }, // rojo
@@ -156,6 +163,7 @@ namespace Game
         {
             ModsManager.RegisterHook("InitializeCreatureTypes", this);
             ModsManager.RegisterHook("SubsystemUpdate", this);
+            ModsManager.RegisterHook("GuiDraw", this);
         }
 
         // ---------- mundo nuevo + aparicion natural ----------
@@ -169,6 +177,7 @@ namespace Game
             cielo = proyecto.FindSubsystem<SubsystemSky>(true);
             jugadores = proyecto.FindSubsystem<SubsystemPlayers>(true);
             terreno = proyecto.FindSubsystem<SubsystemTerrain>(true);
+            horario = proyecto.FindSubsystem<SubsystemTimeOfDay>(false);
             explosiones = proyecto.FindSubsystem<SubsystemExplosions>(true);
             pickables = proyecto.FindSubsystem<SubsystemPickables>(false);
             horda.Clear();
@@ -189,6 +198,8 @@ namespace Game
             hordaEstaNoche = false;
             proximaHorda = 0;
             proximaRevision = 0;
+            jefes.Clear(); zombisVivos.Clear(); esperaRuptura.Clear(); posSalto.Clear(); huds.Clear();
+            muertes = 0; LunaRoja = false; jefeEstaNoche = false; proximoJefe = 0; proximoRuido = 0;
 
             SubsystemTerrain subsystemTerrain = terreno;
             for (int i = 0; i < Variantes.Length; i++)
@@ -417,7 +428,7 @@ namespace Game
 
         // El juego reescribe DiffuseColor en cada cuadro (ComponentCreatureModel.Animate), asi que
         // tenir con colores no se ve. Los campeones usan su textura propia: Textures/Creatures/<Zombi>Campeon<Color>.
-        static readonly string[] NombresColor = { "Rojo", "Amarillo", "Verde", "Azul", "Morado", "Dorado" };
+        static readonly string[] NombresColor = { "Rojo", "Amarillo", "Verde", "Azul", "Morado", "Dorado", "Negro", "Blanco", "Naranja" };
         static readonly Dictionary<string, Engine.Graphics.Texture2D> texturasCampeon =
             new Dictionary<string, Engine.Graphics.Texture2D>();
 
@@ -456,7 +467,9 @@ namespace Game
         // repinta a los campeones vivos en cada frame (menos los regeneradores que parpadean al curarse)
         void PintarCampeones()
         {
-            if (tinteDesactivado || campeones.Count == 0) return;
+            if (tinteDesactivado) return;
+            for (int j = 0; j < jefes.Count; j++) if (EstaViva(jefes[j])) Tenir(jefes[j], CNegro);
+            if (campeones.Count == 0) return;
             foreach (KeyValuePair<ComponentCreature, int> par in campeones)
             {
                 ComponentCreature c = par.Key;
@@ -527,10 +540,10 @@ namespace Game
                 if (vistos.Add(c) && EsZombiCampeonable(Plantilla(c)))
                 {
                     double tirada = azar.NextDouble();
-                    if (tirada < ProbCampeon)
+                    if (tirada < ProbCampeon * (LunaRoja ? MultLunaRoja : 1.0))
                     {
                         // los primeros ProbDorado de la tirada son dorado; el resto reparte entre los otros 5
-                        int tipo = tirada < ProbDorado ? CDorado : azar.Next(5);
+                        int tipo = tirada < ProbDorado ? CDorado : TiposAzar[azar.Next(TiposAzar.Length)];
                         if (nuevos == null) { nuevos = new List<ComponentCreature>(); tiposNuevos = new List<int>(); }
                         nuevos.Add(c);
                         tiposNuevos.Add(tipo);
@@ -568,6 +581,7 @@ namespace Game
                 if (!murio) continue; // desaparecio (amanecer): sin efecto
                 if (tipo == CMorado) SoltarHijos(p);
                 else if (tipo == CDorado) SoltarBotin(p);
+                if (tipo != CDorado) SoltarBotinColor(p, tipo);
             }
         }
 
@@ -686,7 +700,7 @@ namespace Game
                     foreach (KeyValuePair<ComponentCreature, int> par in campeones)
                     {
                         ComponentCreature k = par.Key;
-                        if (par.Value != CVerde && par.Value != CAzul) continue;
+                        if (!(par.Value == CVerde || par.Value == CAzul || par.Value == CNegro || par.Value == CBlanco || par.Value == CNaranja)) continue;
                         if (!EstaViva(k)) continue;
                         if (Vector3.Distance(k.ComponentBody.Position, pl.ComponentBody.Position) > AlcanceGolpe) continue;
 
@@ -699,9 +713,22 @@ namespace Game
                             }
                             venenoHasta[pl] = ahora + VenenoSegundos;
                         }
-                        else
+                        else if (par.Value == CAzul)
                         {
                             Ralentizar(pl, ahora);
+                        }
+                        else if (par.Value == CBlanco)
+                        {
+                            Ralentizar(pl, ahora, FactorCongelado, CongeladoSegundos);
+                            Mensaje(pl, "¡Congelado!");
+                        }
+                        else if (par.Value == CNegro)
+                        {
+                            DrenarStamina(pl);
+                        }
+                        else if (par.Value == CNaranja)
+                        {
+                            Quemar(pl, k);
                         }
                     }
                 }
@@ -785,6 +812,604 @@ namespace Game
             }
         }
 
+        // ======================================================================
+        //  NOCHES ESPECIALES: luna roja, jefe de horda, rompe-bloques, saltarin,
+        //  ruido, botin por color y panel de oleadas
+        // ======================================================================
+
+        // ---- ajustes de las novedades ----
+        const int DiasLunaRoja = 7;            // cada cuantos dias hay luna roja
+        const double MultLunaRoja = 2.5;       // luna roja: probabilidad de campeon x2.5 y hordas x2
+        const int DiasJefe = 3;                // cada cuantos dias sale un jefe de horda
+        const double RetrasoJefe = 25.0;       // segundos tras anochecer hasta que sale el jefe
+        const float EscalaJefe = 2.2f;         // tamano del jefe
+        const float VidaJefe = 10f;            // el jefe aguanta x10
+        const float DanoJefe = 2f;             // el jefe pega x2
+        const int BotinJefe = 8;               // objetos que suelta el jefe
+        const float FactorCongelado = 0.25f;   // blanco: el jugador camina a un cuarto
+        const double CongeladoSegundos = 4.0;
+        const float DrenajeStamina = 0.25f;    // negro: stamina que quita cada golpe (0.25 = 25%)
+        const double FuegoSegundos = 4.0;      // naranja: segundos en llamas
+        const float RupturaDistancia = 12f;    // el tanque rompe bloques si su objetivo esta a menos de esto
+        const double RupturaEspera = 2.0;      // segundos entre cada bloque roto (el jefe: la mitad)
+        const float VelocidadRuido = 3.0f;     // velocidad del jugador a partir de la cual hace ruido (correr)
+        const float RadioRuido = 20f;          // zombis a esta distancia se alertan
+        const int MaxAlertados = 5;            // zombis alertados por cada pulso de ruido
+        const double ProbBotinRaro = 0.10;     // probabilidad de que un campeon suelte tambien un diamante
+
+        public static bool LunaRoja;           // la lee el resto del mod (campeones y hordas)
+
+        SubsystemTimeOfDay horario;
+        int diaNoche;
+        bool jefeEstaNoche;
+        double proximoJefe;
+        double proximoRuido;
+        int muertes;
+        readonly List<ComponentCreature> jefes = new List<ComponentCreature>();
+        readonly HashSet<ComponentCreature> zombisVivos = new HashSet<ComponentCreature>();
+        readonly Dictionary<ComponentCreature, double> esperaRuptura = new Dictionary<ComponentCreature, double>();
+        readonly Dictionary<ComponentCreature, Vector3> posSalto = new Dictionary<ComponentCreature, Vector3>();
+        static bool rupturaDesactivada;
+        static MethodInfo metodoDestruir;
+        static bool destruirBuscado;
+        static MethodInfo metodoFuego;
+        static bool fuegoBuscado;
+
+        // botin por color: nombres de clases de bloque del juego (los que no existan se ignoran)
+        static readonly string[][] BotinColor =
+        {
+            new string[] { "RottenMeatBlock" },                       // rojo
+            new string[] { "BoneBlock", "BonePieceBlock" },           // amarillo
+            new string[] { "RottenMeatBlock", "SaltpeterChunkBlock" },// verde
+            new string[] { "SaltpeterChunkBlock" },                   // azul
+            new string[] { "CoalChunkBlock" },                        // morado
+            new string[] { "SulphurChunkBlock" },                     // dorado (ya tiene su propio botin)
+            new string[] { "CoalChunkBlock" },                        // negro
+            new string[] { "BoneBlock", "BonePieceBlock" },           // blanco
+            new string[] { "SulphurChunkBlock" }                      // naranja
+        };
+        static readonly string[] BotinJefeNombres =
+            { "DiamondChunkBlock", "SulphurChunkBlock", "CopperOreChunkBlock", "IronOreChunkBlock", "CoalChunkBlock", "GermaniumOreChunkBlock" };
+        static readonly Dictionary<string, int> valoresPorNombre = new Dictionary<string, int>();
+
+        static int ValorBloque(string nombre)
+        {
+            int valor;
+            if (valoresPorNombre.TryGetValue(nombre, out valor)) return valor;
+            valor = -1;
+            foreach (Block b in BlocksManager.Blocks)
+            {
+                if (b != null && b.GetType().Name == nombre) { valor = Terrain.MakeBlockValue(b.BlockIndex); break; }
+            }
+            valoresPorNombre[nombre] = valor;
+            return valor;
+        }
+
+        int DiaActual()
+        {
+            object d = LeerMiembro(horario, "Day");
+            return d is int ? (int)d : 0;
+        }
+
+        void MensajeATodos(string texto, Color color)
+        {
+            if (jugadores == null) return;
+            foreach (ComponentPlayer pl in jugadores.ComponentPlayers)
+            {
+                try
+                {
+                    if (pl.ComponentGui != null) pl.ComponentGui.DisplayLargeMessage(texto, "", 4f, 0f);
+                }
+                catch (Exception)
+                {
+                    try { pl.ComponentGui.DisplaySmallMessage(texto, color, true, false); } catch (Exception) { }
+                }
+            }
+        }
+
+        // ---------- calendario: luna roja y jefe ----------
+        void NocheEmpieza(double ahora)
+        {
+            diaNoche = DiaActual();
+            LunaRoja = diaNoche > 0 && diaNoche % DiasLunaRoja == 0;
+            if (LunaRoja)
+            {
+                hordaEstaNoche = true; // la luna roja siempre trae hordas
+                proximaHorda = ahora + 8.0;
+                MensajeATodos("¡LUNA ROJA!", new Color((byte)255, (byte)60, (byte)60));
+            }
+            jefeEstaNoche = diaNoche > 0 && diaNoche % DiasJefe == 0;
+            proximoJefe = ahora + RetrasoJefe;
+        }
+
+        void NocheTermina()
+        {
+            LunaRoja = false;
+            jefeEstaNoche = false;
+        }
+
+        void RevisarJefe(double ahora)
+        {
+            if (jefeEstaNoche && ahora >= proximoJefe && EsNoche())
+            {
+                jefeEstaNoche = false;
+                LanzarJefe();
+            }
+
+            // jefes que murieron (botin) o desaparecieron (amanecer)
+            if (jefes.Count == 0) return;
+            HashSet<ComponentCreature> presentes = new HashSet<ComponentCreature>();
+            foreach (ComponentCreature c in creaturas.Creatures) presentes.Add(c);
+            for (int i = jefes.Count - 1; i >= 0; i--)
+            {
+                ComponentCreature j = jefes[i];
+                bool presente = presentes.Contains(j);
+                bool murio = j.ComponentHealth != null && j.ComponentHealth.Health <= 0f;
+                if (presente && !murio) continue;
+                jefes.RemoveAt(i);
+                tiposCampeon.Remove(j.Entity);
+                if (presente && murio && j.ComponentBody != null)
+                {
+                    MensajeATodos("¡Jefe de horda derrotado!", new Color((byte)120, (byte)255, (byte)120));
+                    SoltarBotinJefe(j.ComponentBody.Position);
+                }
+            }
+        }
+
+        void LanzarJefe()
+        {
+            if (jugadores == null || terreno == null) return;
+            List<ComponentPlayer> vivos = new List<ComponentPlayer>();
+            foreach (ComponentPlayer p in jugadores.ComponentPlayers) if (EstaViva(p)) vivos.Add(p);
+            if (vivos.Count == 0) return;
+            ComponentPlayer objetivo = vivos[azar.Next(vivos.Count)];
+            Vector3 centro = objetivo.ComponentBody.Position;
+
+            for (int intento = 0; intento < 12; intento++)
+            {
+                double angulo = azar.NextDouble() * 6.2831853;
+                int x = (int)Math.Floor(centro.X + Math.Cos(angulo) * 26.0);
+                int z = (int)Math.Floor(centro.Z + Math.Sin(angulo) * 26.0);
+                int y = terreno.Terrain.GetTopHeight(x, z) + 1;
+                int suelo = Terrain.ExtractContents(terreno.Terrain.GetCellValueFast(x, y - 1, z));
+                int aqui = Terrain.ExtractContents(terreno.Terrain.GetCellValueFast(x, y, z));
+                if (suelo == WaterBlock.Index || aqui == WaterBlock.Index) continue;
+                if (!BlocksManager.Blocks[suelo].IsCollidable) continue;
+
+                Entity entidad = creaturas.SpawnCreature(Tanque, new Vector3(x + 0.5f, y, z + 0.5f), false);
+                if (entidad == null) continue;
+                ComponentCreature jefe = entidad.FindComponent<ComponentCreature>();
+                if (jefe == null) continue;
+
+                vistos.Add(jefe);          // el jefe no puede ser ademas campeon
+                horda.Add(jefe);           // desaparece al amanecer
+                jefes.Add(jefe);
+                tiposCampeon[jefe.Entity] = CJefe;
+                Escalar(jefe, EscalaJefe);
+                Tenir(jefe, CNegro);
+
+                object r = LeerMiembro(jefe.ComponentHealth, "AttackResilience");
+                if (r is float) EscribirMiembro(jefe.ComponentHealth, "AttackResilience", (float)r * VidaJefe);
+                ComponentMiner minero = jefe.Entity.FindComponent<ComponentMiner>();
+                object d = LeerMiembro(minero, "AttackPower");
+                if (d is float) EscribirMiembro(minero, "AttackPower", (float)d * DanoJefe);
+
+                ComponentChaseBehavior persecucion = entidad.FindComponent<ComponentChaseBehavior>();
+                if (persecucion != null) persecucion.Attack(objetivo, AlcanceHorda, 240f, true);
+                MensajeATodos("¡Un jefe de horda se acerca!", new Color((byte)255, (byte)160, (byte)60));
+                return;
+            }
+        }
+
+        void SoltarBotinJefe(Vector3 centro)
+        {
+            if (pickables == null) return;
+            List<int> valores = new List<int>();
+            foreach (string n in BotinJefeNombres) { int v = ValorBloque(n); if (v >= 0) valores.Add(v); }
+            if (valores.Count == 0) return;
+            for (int i = 0; i < BotinJefe; i++)
+            {
+                Vector3 pos = new Vector3(centro.X + (float)(azar.NextDouble() * 2.0 - 1.0), centro.Y + 1f,
+                    centro.Z + (float)(azar.NextDouble() * 2.0 - 1.0));
+                SoltarObjeto(valores[azar.Next(valores.Count)], 1, pos);
+            }
+        }
+
+        // botin segun el color del campeon (+ un diamante raro de vez en cuando)
+        void SoltarBotinColor(Vector3 centro, int tipo)
+        {
+            if (pickables == null || tipo < 0 || tipo >= BotinColor.Length) return;
+            foreach (string nombre in BotinColor[tipo])
+            {
+                int valor = ValorBloque(nombre);
+                if (valor < 0) continue;
+                int cantidad = 1 + azar.Next(2);
+                for (int i = 0; i < cantidad; i++)
+                    SoltarObjeto(valor, 1, new Vector3(centro.X + (float)(azar.NextDouble() - 0.5), centro.Y + 0.8f,
+                        centro.Z + (float)(azar.NextDouble() - 0.5)));
+                break; // con un tipo de objeto por campeon basta
+            }
+            if (azar.NextDouble() < ProbBotinRaro)
+            {
+                int diamante = ValorBloque("DiamondChunkBlock");
+                if (diamante >= 0) SoltarObjeto(diamante, 1, new Vector3(centro.X, centro.Y + 1f, centro.Z));
+            }
+        }
+
+        // ---------- efectos de los campeones nuevos ----------
+        void DrenarStamina(ComponentPlayer pl)
+        {
+            ComponentVitalStats vital = pl.ComponentVitalStats;
+            if (vital == null) return;
+            vital.Stamina = MathUtils.Max(0f, vital.Stamina - DrenajeStamina);
+            Mensaje(pl, "¡Te drenaron la stamina!");
+        }
+
+        void Quemar(ComponentCreature victima, ComponentCreature atacante)
+        {
+            try
+            {
+                ComponentOnFire fuego = victima.Entity.FindComponent<ComponentOnFire>();
+                if (fuego != null)
+                {
+                    if (!fuegoBuscado)
+                    {
+                        fuegoBuscado = true;
+                        foreach (MethodInfo m in typeof(ComponentOnFire).GetMethods())
+                        {
+                            if (m.Name != "SetOnFire") continue;
+                            metodoFuego = m;
+                            break;
+                        }
+                    }
+                    if (metodoFuego != null)
+                    {
+                        ParameterInfo[] ps = metodoFuego.GetParameters();
+                        object[] args = new object[ps.Length];
+                        for (int i = 0; i < ps.Length; i++)
+                        {
+                            Type t = ps[i].ParameterType;
+                            if (t == typeof(float)) args[i] = (float)FuegoSegundos;
+                            else if (t.IsAssignableFrom(typeof(ComponentCreature))) args[i] = atacante;
+                            else if (t.IsValueType) args[i] = Activator.CreateInstance(t);
+                            else args[i] = null;
+                        }
+                        metodoFuego.Invoke(fuego, args);
+                        Mensaje(victima, "¡Te prendieron fuego!");
+                        return;
+                    }
+                }
+                Danar(victima, atacante, 1f); // sin fuego en esta version: dano directo
+            }
+            catch (Exception e)
+            {
+                Log.Warning("Zombies: fallo el fuego del campeon naranja: " + e.Message);
+            }
+        }
+
+        void Ralentizar(ComponentCreature victima, double ahora, float factor, double segundos)
+        {
+            if (!lentoHasta.ContainsKey(victima))
+            {
+                ComponentLocomotion loc = victima.Entity.FindComponent<ComponentLocomotion>();
+                object v = LeerMiembro(loc, "WalkSpeed");
+                if (!(v is float)) return;
+                velocidadOriginal[victima] = (float)v;
+                EscribirMiembro(loc, "WalkSpeed", (float)v * factor);
+            }
+            lentoHasta[victima] = ahora + segundos;
+        }
+
+        // ---------- tanque y jefe: rompen puertas y bloques de madera ----------
+        static bool Rompible(Block b)
+        {
+            if (b == null) return false;
+            string n = b.GetType().Name.ToLowerInvariant();
+            if (n.Contains("iron") || n.Contains("steel")) return false;
+            return n.Contains("door") || n.Contains("plank") || n.Contains("fence") || n.Contains("wood") || n.Contains("hatch");
+        }
+
+        bool DestruirBloque(int x, int y, int z)
+        {
+            if (!destruirBuscado)
+            {
+                destruirBuscado = true;
+                foreach (MethodInfo m in typeof(SubsystemTerrain).GetMethods())
+                {
+                    if (m.Name != "DestroyCell") continue;
+                    int enteros = 0;
+                    foreach (ParameterInfo p in m.GetParameters()) if (p.ParameterType == typeof(int)) enteros++;
+                    if (enteros >= 5) { metodoDestruir = m; break; }
+                }
+                if (metodoDestruir == null) Log.Warning("Zombies: DestroyCell no encontrado; el tanque no rompera bloques");
+            }
+            if (metodoDestruir == null) return false;
+            ParameterInfo[] ps = metodoDestruir.GetParameters();
+            object[] args = new object[ps.Length];
+            int k = 0;
+            for (int i = 0; i < ps.Length; i++)
+            {
+                Type t = ps[i].ParameterType;
+                if (t == typeof(int))
+                {
+                    // orden de los enteros: nivel de herramienta, x, y, z, valor nuevo
+                    int[] orden = { 0, x, y, z, 0 };
+                    args[i] = k < orden.Length ? orden[k] : 0;
+                    k++;
+                }
+                else if (t == typeof(bool)) args[i] = false;
+                else if (t.IsValueType) args[i] = Activator.CreateInstance(t);
+                else args[i] = null;
+            }
+            metodoDestruir.Invoke(terreno, args);
+            return true;
+        }
+
+        void RevisarRompedores(double ahora)
+        {
+            if (rupturaDesactivada || terreno == null) return;
+            try
+            {
+                foreach (ComponentCreature c in creaturas.Creatures)
+                {
+                    if (!EstaViva(c)) continue;
+                    bool esJefe = jefes.Contains(c);
+                    if (!esJefe && Plantilla(c) != Tanque) continue;
+
+                    ComponentChaseBehavior persecucion = c.Entity.FindComponent<ComponentChaseBehavior>();
+                    ComponentCreature objetivo = LeerMiembro(persecucion, "Target") as ComponentCreature;
+                    if (objetivo == null || !EstaViva(objetivo)) continue;
+
+                    double espera;
+                    if (esperaRuptura.TryGetValue(c, out espera) && ahora < espera) continue;
+
+                    Vector3 p = c.ComponentBody.Position;
+                    Vector3 d = objetivo.ComponentBody.Position - p;
+                    d.Y = 0f;
+                    float dist = d.Length();
+                    if (dist < 1.2f || dist > RupturaDistancia) continue;
+                    d = d / dist;
+
+                    float alcance = c.ComponentBody.BoxSize.X * 0.5f + 0.6f;
+                    int x = (int)Math.Floor(p.X + d.X * alcance);
+                    int z = (int)Math.Floor(p.Z + d.Z * alcance);
+                    int y0 = (int)Math.Floor(p.Y + 0.1f);
+                    for (int h = 0; h < 2; h++)
+                    {
+                        int contenido = Terrain.ExtractContents(terreno.Terrain.GetCellValueFast(x, y0 + h, z));
+                        if (contenido == 0) continue;
+                        if (!Rompible(BlocksManager.Blocks[contenido])) continue;
+                        if (DestruirBloque(x, y0 + h, z))
+                            esperaRuptura[c] = ahora + (esJefe ? RupturaEspera * 0.5 : RupturaEspera);
+                        break;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                rupturaDesactivada = true;
+                Log.Warning("Zombies: rompe-bloques desactivado por error: " + e);
+            }
+        }
+
+        // ---------- zombi rapido: salta los obstaculos cuando se atasca ----------
+        void RevisarSaltadores(double ahora)
+        {
+            foreach (ComponentCreature c in creaturas.Creatures)
+            {
+                if (!EstaViva(c) || Plantilla(c) != Rapido) continue;
+                Vector3 p = c.ComponentBody.Position;
+                Vector3 antes;
+                bool tenia = posSalto.TryGetValue(c, out antes);
+                posSalto[c] = p;
+                if (!tenia) continue;
+
+                ComponentChaseBehavior persecucion = c.Entity.FindComponent<ComponentChaseBehavior>();
+                ComponentCreature objetivo = LeerMiembro(persecucion, "Target") as ComponentCreature;
+                if (objetivo == null || !EstaViva(objetivo)) continue;
+
+                Vector3 hacia = objetivo.ComponentBody.Position - p;
+                hacia.Y = 0f;
+                float dist = hacia.Length();
+                if (dist < 2.5f) continue;
+                Vector3 mov = p - antes;
+                mov.Y = 0f;
+                if (mov.Length() > 0.15f) continue;             // avanza bien: no hace falta saltar
+                if (!c.ComponentBody.StandingOnValue.HasValue) continue; // ya esta en el aire
+
+                hacia = hacia / dist;
+                ComponentLocomotion loc = c.Entity.FindComponent<ComponentLocomotion>();
+                EscribirMiembro(loc, "JumpOrder", 1f);
+                object vel = LeerMiembro(c.ComponentBody, "Velocity");
+                if (vel is Vector3)
+                    EscribirMiembro(c.ComponentBody, "Velocity", (Vector3)vel + new Vector3(hacia.X * 2.5f, 0f, hacia.Z * 2.5f));
+            }
+            if (posSalto.Count > 200)
+            {
+                List<ComponentCreature> quitar = new List<ComponentCreature>();
+                foreach (ComponentCreature k in posSalto.Keys) if (!EstaViva(k)) quitar.Add(k);
+                foreach (ComponentCreature k in quitar) posSalto.Remove(k);
+            }
+        }
+
+        // ---------- ruido: correr atrae a los zombis cercanos ----------
+        void RevisarRuido(double ahora)
+        {
+            if (jugadores == null || ahora < proximoRuido) return;
+            proximoRuido = ahora + 1.0;
+            foreach (ComponentPlayer pl in jugadores.ComponentPlayers)
+            {
+                if (!EstaViva(pl)) continue;
+                object v = LeerMiembro(pl.ComponentBody, "Velocity");
+                if (!(v is Vector3)) continue;
+                Vector3 vel = (Vector3)v;
+                float horizontal = (float)Math.Sqrt(vel.X * vel.X + vel.Z * vel.Z);
+                if (horizontal < VelocidadRuido) continue;
+
+                int alertados = 0;
+                foreach (ComponentCreature c in creaturas.Creatures)
+                {
+                    if (alertados >= MaxAlertados) break;
+                    if (!EstaViva(c) || !EsZombiCampeonable(Plantilla(c))) continue;
+                    if (Vector3.Distance(c.ComponentBody.Position, pl.ComponentBody.Position) > RadioRuido) continue;
+                    ComponentChaseBehavior persecucion = c.Entity.FindComponent<ComponentChaseBehavior>();
+                    if (persecucion == null || LeerMiembro(persecucion, "Target") != null) continue; // ya persigue a alguien
+                    persecucion.Attack(pl, RadioRuido + 12f, 30f, false);
+                    alertados++;
+                }
+            }
+        }
+
+        // ---------- zombis eliminados ----------
+        void RevisarMuertes()
+        {
+            HashSet<ComponentCreature> presentes = new HashSet<ComponentCreature>();
+            foreach (ComponentCreature c in creaturas.Creatures)
+            {
+                presentes.Add(c);
+                if (EstaViva(c) && EsZombiCampeonable(Plantilla(c))) zombisVivos.Add(c);
+            }
+            if (zombisVivos.Count == 0) return;
+            List<ComponentCreature> quitar = null;
+            foreach (ComponentCreature z in zombisVivos)
+            {
+                bool murio = z.ComponentHealth != null && z.ComponentHealth.Health <= 0f;
+                if (!murio && presentes.Contains(z)) continue;
+                if (murio) muertes++;
+                if (quitar == null) quitar = new List<ComponentCreature>();
+                quitar.Add(z);
+            }
+            if (quitar != null) foreach (ComponentCreature z in quitar) zombisVivos.Remove(z);
+        }
+
+        // ---------- panel de oleadas (arriba a la izquierda) + barra del jefe ----------
+        class Hud
+        {
+            public StackPanelWidget Caja;
+            public LabelWidget Info;
+            public LabelWidget Luna;
+            public LabelWidget NombreJefe;
+            public CanvasWidget CajaBarra;
+            public RectangleWidget Relleno;
+            public string UltimoInfo;
+            public string UltimoJefe;
+        }
+
+        readonly Dictionary<ComponentGui, Hud> huds = new Dictionary<ComponentGui, Hud>();
+        static bool hudDesactivado;
+        const float AnchoBarraJefe = 230f;
+
+        public override void GuiDraw(ComponentGui componentGui, Camera camera, int drawOrder)
+        {
+            if (hudDesactivado || componentGui == null) return;
+            try
+            {
+                ContainerWidget contenedor = componentGui.ControlsContainerWidget;
+                if (contenedor == null || creaturas == null) return;
+
+                Hud h;
+                if (!huds.TryGetValue(componentGui, out h))
+                {
+                    List<ComponentGui> viejos = new List<ComponentGui>();
+                    foreach (KeyValuePair<ComponentGui, Hud> par in huds)
+                    {
+                        if (par.Value.Caja != null && par.Value.Caja.ParentWidget == contenedor)
+                        {
+                            contenedor.RemoveChildren(par.Value.Caja);
+                            viejos.Add(par.Key);
+                        }
+                    }
+                    for (int i = 0; i < viejos.Count; i++) huds.Remove(viejos[i]);
+
+                    h = new Hud();
+                    h.Caja = new StackPanelWidget();
+                    h.Caja.Direction = LayoutDirection.Vertical;
+                    h.Caja.HorizontalAlignment = WidgetAlignment.Near;
+                    h.Caja.VerticalAlignment = WidgetAlignment.Near;
+                    h.Caja.Margin = new Vector2(150f, 6f);
+                    h.Caja.IsHitTestVisible = false;
+
+                    h.Info = new LabelWidget();
+                    h.Info.FontScale = 0.8f;
+                    h.Info.Color = Color.White;
+                    h.Info.HorizontalAlignment = WidgetAlignment.Near;
+                    h.Caja.AddChildren(h.Info);
+
+                    h.Luna = new LabelWidget();
+                    h.Luna.FontScale = 0.9f;
+                    h.Luna.Color = new Color((byte)255, (byte)70, (byte)70);
+                    h.Luna.Text = "¡LUNA ROJA!";
+                    h.Luna.HorizontalAlignment = WidgetAlignment.Near;
+                    h.Luna.IsVisible = false;
+                    h.Caja.AddChildren(h.Luna);
+
+                    h.NombreJefe = new LabelWidget();
+                    h.NombreJefe.FontScale = 0.8f;
+                    h.NombreJefe.Color = new Color((byte)255, (byte)170, (byte)70);
+                    h.NombreJefe.HorizontalAlignment = WidgetAlignment.Near;
+                    h.NombreJefe.IsVisible = false;
+                    h.Caja.AddChildren(h.NombreJefe);
+
+                    h.CajaBarra = new CanvasWidget();
+                    h.CajaBarra.Size = new Vector2(AnchoBarraJefe, 8f);
+                    h.CajaBarra.HorizontalAlignment = WidgetAlignment.Near;
+                    h.CajaBarra.IsVisible = false;
+                    RectangleWidget fondo = new RectangleWidget();
+                    fondo.Size = new Vector2(AnchoBarraJefe, 8f);
+                    fondo.HorizontalAlignment = WidgetAlignment.Near;
+                    fondo.VerticalAlignment = WidgetAlignment.Near;
+                    fondo.FillColor = new Color((byte)30, (byte)30, (byte)30, (byte)200);
+                    fondo.OutlineColor = new Color((byte)255, (byte)255, (byte)255, (byte)120);
+                    fondo.OutlineThickness = 1f;
+                    h.CajaBarra.AddChildren(fondo);
+                    h.Relleno = new RectangleWidget();
+                    h.Relleno.Size = new Vector2(AnchoBarraJefe, 8f);
+                    h.Relleno.HorizontalAlignment = WidgetAlignment.Near;
+                    h.Relleno.VerticalAlignment = WidgetAlignment.Near;
+                    h.Relleno.FillColor = new Color((byte)200, (byte)40, (byte)40, (byte)255);
+                    h.Relleno.OutlineColor = Color.Transparent;
+                    h.CajaBarra.AddChildren(h.Relleno);
+                    h.Caja.AddChildren(h.CajaBarra);
+
+                    contenedor.AddChildren(h.Caja);
+                    huds[componentGui] = h;
+                }
+
+                string info = "Dia " + DiaActual() + "  |  Zombis: " + muertes;
+                if (info != h.UltimoInfo) { h.UltimoInfo = info; h.Info.Text = info; }
+                h.Luna.IsVisible = LunaRoja;
+
+                ComponentCreature jefe = null;
+                for (int i = 0; i < jefes.Count; i++) if (EstaViva(jefes[i])) { jefe = jefes[i]; break; }
+                h.NombreJefe.IsVisible = jefe != null;
+                h.CajaBarra.IsVisible = jefe != null;
+                if (jefe != null)
+                {
+                    float v = MathUtils.Clamp(jefe.ComponentHealth.Health, 0f, 1f);
+                    float max = jefe.ComponentHealth.AttackResilience;
+                    string txt = "JEFE DE HORDA  " + (max > 0f
+                        ? (v * max).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " / " + max.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+                        : (v * 100f).ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "%");
+                    if (txt != h.UltimoJefe)
+                    {
+                        h.UltimoJefe = txt;
+                        h.NombreJefe.Text = txt;
+                        h.Relleno.Size = new Vector2(MathUtils.Max(AnchoBarraJefe * v, 1f), 8f);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                hudDesactivado = true;
+                Log.Warning("Zombies: panel de oleadas desactivado por error: " + ex);
+            }
+        }
+
+        int LimiteHorda()
+        {
+            return LunaRoja ? MaxZombisHorda * 2 : MaxZombisHorda;
+        }
+
         // ---------- hordas y explosivos ----------
         public override void SubsystemUpdate(float dt)
         {
@@ -801,10 +1426,12 @@ namespace Game
                 // empieza la noche: se decide si habra hordas y cuando llega la primera
                 hordaEstaNoche = azar.NextDouble() < ProbHorda;
                 proximaHorda = ahora + PrimeraHorda;
+                NocheEmpieza(ahora);
             }
             else if (!noche && eraNoche)
             {
                 hordaEstaNoche = false;
+                NocheTermina();
             }
             eraNoche = noche;
 
@@ -820,12 +1447,17 @@ namespace Game
             RevisarCampeones(ahora);
             RevisarGolpes(ahora);
             AplicarEfectos(ahora);
+            RevisarJefe(ahora);
+            RevisarRompedores(ahora);
+            RevisarSaltadores(ahora);
+            RevisarRuido(ahora);
+            RevisarMuertes();
         }
 
         void LanzarHorda()
         {
             if (jugadores == null || terreno == null) return;
-            if (horda.Count >= MaxZombisHorda) return;
+            if (horda.Count >= LimiteHorda()) return;
 
             List<ComponentPlayer> vivos = new List<ComponentPlayer>();
             foreach (ComponentPlayer p in jugadores.ComponentPlayers)
@@ -837,8 +1469,9 @@ namespace Game
             ComponentPlayer objetivo = vivos[azar.Next(vivos.Count)];
             Vector3 centro = objetivo.ComponentBody.Position;
             int cantidad = azar.Next(ZombisHordaMin, ZombisHordaMax + 1);
+            if (LunaRoja) cantidad *= 2;
 
-            for (int i = 0; i < cantidad && horda.Count < MaxZombisHorda; i++)
+            for (int i = 0; i < cantidad && horda.Count < LimiteHorda(); i++)
             {
                 double angulo = azar.NextDouble() * 6.2831853;
                 double radio = RadioMin + azar.NextDouble() * (RadioMax - RadioMin);
